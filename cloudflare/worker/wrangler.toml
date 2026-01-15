@@ -1,0 +1,9 @@
+name = "tablet-monitor-api"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+account_id = "85b301e09d399a4c5cc4933d0ac9fd03"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tablet-monitor"
+database_id = "efd09049-fc15-4692-b07b-bc3eb51af718"

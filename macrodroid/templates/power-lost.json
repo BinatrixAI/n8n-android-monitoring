@@ -1,0 +1,7 @@
+{
+"device_id": "tablet_001",
+"event_type": "power_lost",
+"battery_level": {battery},
+"is_charging": "off",
+"timestamp": "{year}-{month_digit}-{dayofmonth}T{hour_0}:{minute}:{second}Z"
+}

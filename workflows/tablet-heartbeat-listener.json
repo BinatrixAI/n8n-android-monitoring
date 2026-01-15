@@ -1,0 +1,170 @@
+{
+  "name": "Tablet Heartbeat Listener",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tablet-heartbeat",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Tablet Heartbeat",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 304]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $input.first().json.body;\n\nreturn [{\n  json: {\n    device_id: body.device_id || 'unknown',\n    event_type: body.event_type || 'heartbeat',\n    battery_level: body.battery_level || 0,\n    is_charging: body.is_charging || false,\n    timestamp: body.timestamp || new Date().toISOString()\n  }\n}];"
+      },
+      "id": "extract-data",
+      "name": "Extract Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [448, 304]
+    },
+    {
+      "id": "read-from-d1",
+      "name": "Read Device from D1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 304],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://tablet-monitor-api.binatrix.workers.dev/api/tablets/{{ $json.device_id }}",
+        "options": {}
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Get incoming webhook data from Extract Data node\nconst incoming = $('Extract Data').first().json;\n\n// Get current device state from D1 API\nconst httpResponse = $('Read Device from D1').first().json;\nconst currentState = httpResponse.error ? {} : httpResponse;\n\nconst deviceId = incoming.device_id;\nconst eventType = incoming.event_type;\nconst batteryLevel = incoming.battery_level;\nconst isCharging = incoming.is_charging;\nconst timestamp = incoming.timestamp;\n\n// Check if device was offline or had an alert\nconst wasOffline = currentState.status === 'offline' || currentState.alert_sent === 1 || currentState.alert_sent === true;\nconst isRecovery = wasOffline && eventType === 'heartbeat';\n\n// Battery drop detection\nconst lastBatteryAlert = parseInt(currentState.last_battery_alert_level) || 100;\nconst batteryDropped = (lastBatteryAlert - batteryLevel) >= 10;\nconst needsBatteryAlert = !isCharging && batteryDropped && batteryLevel < 90;\n\nlet alertToSend = 'none';\nlet newAlertSent = false;\n\nif (eventType === 'power_lost') {\n  alertToSend = 'power_lost';\n  newAlertSent = true;\n} else if (eventType === 'low_battery' || (batteryLevel <= 20 && !isCharging)) {\n  alertToSend = 'low_battery';\n  newAlertSent = true;\n} else if (isRecovery) {\n  alertToSend = 'recovery';\n  newAlertSent = false;\n} else if (needsBatteryAlert) {\n  alertToSend = 'battery_drop';\n  newAlertSent = true;\n}\n\nreturn [{\n  json: {\n    device_id: deviceId,\n    device_name: currentState.device_name || 'Reception Tablet',\n    last_seen: timestamp,\n    battery_level: batteryLevel,\n    is_charging: isCharging,\n    alert_sent: newAlertSent,\n    alert_type: alertToSend,\n    alert_timestamp: newAlertSent ? new Date().toISOString() : (currentState.alert_timestamp || ''),\n    last_battery_alert_level: needsBatteryAlert ? batteryLevel : (currentState.last_battery_alert_level || 100),\n    status: 'online',\n    should_send_alert: alertToSend !== 'none',\n    alert_message_type: alertToSend\n  }\n}];"
+      },
+      "id": "detect-event",
+      "name": "Detect Event Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [848, 304]
+    },
+    {
+      "id": "update-to-d1",
+      "name": "Update Device in D1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1040, 304],
+      "parameters": {
+        "method": "POST",
+        "url": "https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "alert-check",
+              "leftValue": "={{ $('Detect Event Type').first().json.should_send_alert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "should-alert",
+      "name": "Should Send Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1248, 304]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Detect Event Type').first().json;\nconst alertType = data.alert_message_type;\nconst deviceName = data.device_name;\nconst battery = data.battery_level;\n\n// Use current time in Jerusalem timezone\nconst timestamp = new Date().toLocaleString('en-GB', {\n  timeZone: 'Asia/Jerusalem',\n  day: '2-digit',\n  month: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit',\n  hour12: false\n});\n\nlet message = '';\n\nswitch(alertType) {\n  case 'power_lost':\n    message = `⚠️ **Power Supply Disconnected**\\n\\nDevice: ${deviceName}\\nBattery: ${battery}%\\nTime: ${timestamp}\\n\\nThe tablet is now running on battery power.`;\n    break;\n  case 'low_battery':\n    message = `🔋 **Low Battery Warning**\\n\\nDevice: ${deviceName}\\nBattery: ${battery}%\\nTime: ${timestamp}\\n\\nBattery is critically low. Device may shut down soon.`;\n    break;\n  case 'battery_drop':\n    message = `📉 **Battery Level Update**\\n\\nDevice: ${deviceName}\\nBattery: ${battery}%\\nTime: ${timestamp}\\n\\nBattery has dropped another 10%.`;\n    break;\n  case 'recovery':\n    message = `✅ **System Online**\\n\\nDevice: ${deviceName}\\nBattery: ${battery}% (Charging: ${data.is_charging ? 'Yes' : 'No'})\\nTime: ${timestamp}\\n\\nThe device is back online and sending heartbeats.`;\n    break;\n  default:\n    message = `Alert from ${deviceName} at ${timestamp}`;\n}\n\nreturn [{\n  json: {\n    message: message,\n    device_id: data.device_id,\n    alert_type: alertType,\n    battery_level: battery\n  }\n}];"
+      },
+      "id": "format-alert",
+      "name": "Format Alert Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 208]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-telegram",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1648, 208],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "log-alert-d1",
+      "name": "Log Alert to D1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1856, 208],
+      "parameters": {
+        "method": "POST",
+        "url": "https://tablet-monitor-api.binatrix.workers.dev/api/alert",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ device_id: $('Format Alert Message').first().json.device_id, alert_type: $('Format Alert Message').first().json.alert_type, message: $('Format Alert Message').first().json.message, battery_level: $('Format Alert Message').first().json.battery_level }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook - Tablet Heartbeat": {
+      "main": [[{"node": "Extract Data", "type": "main", "index": 0}]]
+    },
+    "Extract Data": {
+      "main": [[{"node": "Read Device from D1", "type": "main", "index": 0}]]
+    },
+    "Read Device from D1": {
+      "main": [[{"node": "Detect Event Type", "type": "main", "index": 0}]]
+    },
+    "Detect Event Type": {
+      "main": [[{"node": "Update Device in D1", "type": "main", "index": 0}]]
+    },
+    "Update Device in D1": {
+      "main": [[{"node": "Should Send Alert?", "type": "main", "index": 0}]]
+    },
+    "Should Send Alert?": {
+      "main": [[{"node": "Format Alert Message", "type": "main", "index": 0}]]
+    },
+    "Format Alert Message": {
+      "main": [[{"node": "Send Telegram Alert", "type": "main", "index": 0}]]
+    },
+    "Send Telegram Alert": {
+      "main": [[{"node": "Log Alert to D1", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Jerusalem"
+  }
+}

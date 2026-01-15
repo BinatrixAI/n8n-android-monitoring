@@ -1,0 +1,137 @@
+{
+  "name": "Tablet Watchdog Timer",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes"}]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 304]
+    },
+    {
+      "id": "read-all-from-d1",
+      "name": "Read All Tablets from D1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [448, 304],
+      "parameters": {
+        "method": "GET",
+        "url": "https://tablet-monitor-api.binatrix.workers.dev/api/tablets",
+        "options": {}
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Get all tablets from D1 API\nconst tablets = $input.all();\nconst now = new Date();\nconst SILENCE_THRESHOLD_MS = 35 * 60 * 1000; // 35 minutes\nconst results = [];\n\n// If the response is an array (API returns array of tablets)\nconst tabletList = Array.isArray(tablets[0]?.json) ? tablets[0].json : tablets.map(t => t.json);\n\nfor (const tablet of tabletList) {\n  if (!tablet.last_seen || !tablet.device_id) continue;\n  \n  const lastSeen = new Date(tablet.last_seen);\n  const timeSinceLastSeen = now - lastSeen;\n  const minutesSinceLastSeen = Math.floor(timeSinceLastSeen / 60000);\n  const isSilent = timeSinceLastSeen >= SILENCE_THRESHOLD_MS;\n  \n  // Only alert if:\n  // 1. Device is silent (35+ min)\n  // 2. Alert hasn't been sent yet\n  // 3. Device status is not already 'offline'\n  const shouldAlert = isSilent && \n    (tablet.alert_sent === 0 || tablet.alert_sent === false || !tablet.alert_sent) && \n    tablet.status !== 'offline';\n  \n  if (shouldAlert) {\n    results.push({\n      json: {\n        device_id: tablet.device_id,\n        device_name: tablet.device_name || 'Unknown Device',\n        last_seen: tablet.last_seen,\n        last_seen_formatted: lastSeen.toLocaleString('en-US', {\n          month: '2-digit',\n          day: '2-digit',\n          hour: '2-digit',\n          minute: '2-digit',\n          hour12: false\n        }),\n        minutes_silent: minutesSinceLastSeen,\n        battery_level: tablet.battery_level,\n        needs_alert: true\n      }\n    });\n  }\n}\n\nreturn results.length > 0 ? results : [{ json: { needs_alert: false } }];"
+      },
+      "id": "check-silent",
+      "name": "Check for Silent Tablets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 304]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-alert-check",
+              "leftValue": "={{ $json.needs_alert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "any-alerts",
+      "name": "Any Alerts Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [848, 304]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst message = `🚨 **Connection Lost**\\n\\nDevice: ${data.device_name}\\nLast Seen: ${data.last_seen_formatted}\\nSilent For: ${data.minutes_silent} minutes\\nLast Battery: ${data.battery_level}%\\n\\nThe device hasn't sent a heartbeat in over 35 minutes. The site may be experiencing an outage.`;\n\nreturn [{\n  json: {\n    message: message,\n    device_id: data.device_id\n  }\n}];"
+      },
+      "id": "format-connection-lost",
+      "name": "Format Connection Lost Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 208]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-telegram-alert",
+      "name": "Send Connection Lost Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1248, 208],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "update-alert-d1",
+      "name": "Update Alert Status in D1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1440, 208],
+      "parameters": {
+        "method": "POST",
+        "url": "https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ device_id: $json.device_id, alert_sent: true, alert_type: 'connection_lost', alert_timestamp: new Date().toISOString(), status: 'offline' }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [[{"node": "Read All Tablets from D1", "type": "main", "index": 0}]]
+    },
+    "Read All Tablets from D1": {
+      "main": [[{"node": "Check for Silent Tablets", "type": "main", "index": 0}]]
+    },
+    "Check for Silent Tablets": {
+      "main": [[{"node": "Any Alerts Needed?", "type": "main", "index": 0}]]
+    },
+    "Any Alerts Needed?": {
+      "main": [[{"node": "Format Connection Lost Alert", "type": "main", "index": 0}]]
+    },
+    "Format Connection Lost Alert": {
+      "main": [[{"node": "Send Connection Lost Alert", "type": "main", "index": 0}]]
+    },
+    "Send Connection Lost Alert": {
+      "main": [[{"node": "Update Alert Status in D1", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

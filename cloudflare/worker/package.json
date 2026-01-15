@@ -1,0 +1,15 @@
+{
+  "name": "tablet-monitor-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240620.0",
+    "typescript": "^5.4.5",
+    "wrangler": "^3.60.0"
+  }
+}

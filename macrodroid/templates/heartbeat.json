@@ -1,0 +1,7 @@
+{
+"device_id": "tablet_001",
+"event_type": "heartbeat",
+"battery_level": {battery},
+"is_charging": "{power}",
+"timestamp": "{year}-{month_digit}-{dayofmonth}T{hour_0}:{minute}:{second}Z"
+}
