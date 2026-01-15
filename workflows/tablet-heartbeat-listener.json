@@ -16,7 +16,7 @@
     {
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const body = $input.first().json.body;\n\nreturn [{\n  json: {\n    device_id: body.device_id || 'unknown',\n    event_type: body.event_type || 'heartbeat',\n    battery_level: body.battery_level || 0,\n    is_charging: body.is_charging || false,\n    timestamp: body.timestamp || new Date().toISOString()\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body;\n\n// MacroDroid sends is_charging as \"on\" or \"off\" strings\n// Convert to proper boolean (string \"off\" is truthy in JS!)\nconst isCharging = body.is_charging === true || body.is_charging === 'on' || body.is_charging === 1;\n\nreturn [{\n  json: {\n    device_id: body.device_id || 'unknown',\n    event_type: body.event_type || 'heartbeat',\n    battery_level: body.battery_level || 0,\n    is_charging: isCharging,\n    timestamp: body.timestamp || new Date().toISOString()\n  }\n}];"
       },
       "id": "extract-data",
       "name": "Extract Data",

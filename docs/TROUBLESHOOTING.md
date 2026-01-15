@@ -187,6 +187,24 @@ wrangler d1 execute tablet-monitor --file=cloudflare/d1/schema.sql --remote
 
 ---
 
+## Charging Status Issues
+
+### Shows "Charging" When Not Plugged In
+
+**Symptom**: Dashboard shows "(charging)" but tablet is on battery
+
+**Cause**: MacroDroid sends `is_charging: "on"` or `"off"` as strings. JavaScript string `"off"` is truthy!
+
+**Solution**: Extract Data node must explicitly check for true values:
+```javascript
+const isCharging = body.is_charging === true || body.is_charging === 'on' || body.is_charging === 1;
+```
+
+❌ Wrong: `is_charging: body.is_charging || false` (string "off" → truthy → true)
+✅ Correct: Explicit check for "on"/true/1
+
+---
+
 ## Alert Logic Issues
 
 ### Getting Duplicate Alerts
