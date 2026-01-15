@@ -193,15 +193,18 @@ wrangler d1 execute tablet-monitor --file=cloudflare/d1/schema.sql --remote
 
 **Symptom**: Dashboard shows "(charging)" but tablet is on battery
 
-**Cause**: MacroDroid sends `is_charging: "on"` or `"off"` as strings. JavaScript string `"off"` is truthy!
+**Cause**: MacroDroid sends `is_charging: "On"` or `"Off"` as strings (capital O!). JavaScript string `"Off"` is truthy!
 
-**Solution**: Extract Data node must explicitly check for true values:
+**Solution**: Extract Data node must explicitly check with case-insensitive comparison:
 ```javascript
-const isCharging = body.is_charging === true || body.is_charging === 'on' || body.is_charging === 1;
+const isCharging = body.is_charging === true ||
+                   String(body.is_charging).toLowerCase() === 'on' ||
+                   body.is_charging === 1;
 ```
 
-❌ Wrong: `is_charging: body.is_charging || false` (string "off" → truthy → true)
-✅ Correct: Explicit check for "on"/true/1
+❌ Wrong: `is_charging: body.is_charging || false` (string "Off" → truthy → true)
+❌ Wrong: `body.is_charging === 'on'` (MacroDroid sends "On" with capital O)
+✅ Correct: Case-insensitive check with `.toLowerCase()`
 
 ---
 
