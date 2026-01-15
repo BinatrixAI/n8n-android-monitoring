@@ -28,10 +28,15 @@ These JSON files can be imported directly into n8n.
 
 ### Alert Types Handled
 
-- `power_lost` - Charger disconnected
-- `low_battery` - Battery ≤ 20%
-- `recovery` - Device back online
-- `battery_drop` - Battery dropped 10%
+| Alert Type | Trigger | Severity |
+|------------|---------|----------|
+| `power_lost` | Charger disconnected | Warning |
+| `medium_battery` | Battery < 50% | Info |
+| `low_battery` | Battery < 20% | Warning |
+| `critical_battery` | Battery < 5% | Critical |
+| `recovery` | Device back online | Success |
+
+**Note**: Battery alerts only trigger once per threshold. Thresholds reset when battery charges above 50%.
 
 ## Workflow 2: Tablet Watchdog Timer
 
@@ -50,7 +55,7 @@ These JSON files can be imported directly into n8n.
 ### Timing
 
 - Runs every 5 minutes
-- Alerts after 35 minutes of silence
+- Alerts after 30 minutes of silence
 - Only alerts once (until device recovers)
 
 ## Current Live IDs
