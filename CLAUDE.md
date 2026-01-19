@@ -67,10 +67,10 @@ Old Webhook:       https://agent.binatrix.io/webhook/tablet-heartbeat (DO NOT US
 ### Critical Events (Immediate via Webhook)
 - `power_lost` - Charger disconnected (is_charging: 1 → 0)
 - `critical_battery` - Battery < 5% and not charging
+- `recovery` - Device was offline, now sending heartbeat
 
 ### Non-Critical Events (5-min Polling)
 - `connection_lost` - No heartbeat for 30+ minutes
-- `recovery` - Device back online after being offline
 - `medium_battery` - Battery < 50%
 - `low_battery` - Battery < 20%
 
