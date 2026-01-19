@@ -161,14 +161,19 @@ export default {
         });
       }
 
-      // POST /api/alert - Log alert to history (called by n8n)
+      // POST /api/alert - Log alert to history AND update tablet state (called by n8n)
       if (path === '/api/alert' && request.method === 'POST') {
-        const data = await request.json() as AlertData;
+        const data = await request.json() as AlertData & {
+          status?: string;
+          alert_sent?: boolean;
+          last_battery_alert_level?: number;
+        };
 
         if (!data.device_id || !data.alert_type) {
           return errorResponse('device_id and alert_type are required');
         }
 
+        // Log to alert history
         await env.DB.prepare(`
           INSERT INTO alert_history (device_id, alert_type, message, battery_level)
           VALUES (?, ?, ?, ?)
@@ -178,6 +183,30 @@ export default {
           data.message || null,
           data.battery_level ?? null
         ).run();
+
+        // Update tablet state if additional fields provided
+        const newStatus = data.alert_type === 'connection_lost' ? 'offline'
+          : data.alert_type === 'recovery' ? 'online'
+          : data.status;
+
+        if (newStatus || data.alert_sent !== undefined || data.last_battery_alert_level !== undefined) {
+          await env.DB.prepare(`
+            UPDATE tablets SET
+              status = COALESCE(?, status),
+              alert_sent = COALESCE(?, alert_sent),
+              alert_type = ?,
+              alert_timestamp = CURRENT_TIMESTAMP,
+              last_battery_alert_level = COALESCE(?, last_battery_alert_level),
+              updated_at = CURRENT_TIMESTAMP
+            WHERE device_id = ?
+          `).bind(
+            newStatus || null,
+            data.alert_sent !== undefined ? (data.alert_sent ? 1 : 0) : null,
+            data.alert_type,
+            data.last_battery_alert_level ?? null,
+            data.device_id
+          ).run();
+        }
 
         return jsonResponse({ success: true });
       }
