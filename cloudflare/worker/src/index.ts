@@ -84,7 +84,7 @@ export default {
 
         // Step 1: Read current state (to save as previous and detect changes)
         const current = await env.DB.prepare(`
-          SELECT is_charging, battery_level, last_battery_alert_level, alert_sent, device_name
+          SELECT is_charging, battery_level, last_battery_alert_level, alert_sent, device_name, status
           FROM tablets WHERE device_id = ?
         `).bind(data.device_id).first<{
           is_charging: number;
@@ -92,6 +92,7 @@ export default {
           last_battery_alert_level: number;
           alert_sent: number;
           device_name: string;
+          status: string;
         }>();
 
         if (!current) {
@@ -101,8 +102,12 @@ export default {
         // Step 2: Detect critical events that need immediate alert
         let criticalEvent: string | null = null;
 
+        // Recovery: device was offline, now sending heartbeat
+        if (current.status === 'offline') {
+          criticalEvent = 'recovery';
+        }
         // Power lost: was charging, now not charging
-        if (current.is_charging === 1 && isCharging === 0) {
+        else if (current.is_charging === 1 && isCharging === 0) {
           criticalEvent = 'power_lost';
         }
         // Critical battery: below 5%, not charging, haven't alerted at this level
@@ -111,6 +116,8 @@ export default {
         }
 
         // Step 3: Update D1 with new values, storing previous state
+        // On recovery, reset alert_sent and last_battery_alert_level
+        const resetAlertState = criticalEvent === 'recovery';
         const result = await env.DB.prepare(`
           UPDATE tablets SET
             previous_is_charging = ?,
@@ -119,6 +126,8 @@ export default {
             battery_level = ?,
             is_charging = ?,
             status = 'online',
+            alert_sent = CASE WHEN ? THEN 0 ELSE alert_sent END,
+            last_battery_alert_level = CASE WHEN ? THEN 100 ELSE last_battery_alert_level END,
             updated_at = CURRENT_TIMESTAMP
           WHERE device_id = ?
         `).bind(
@@ -127,12 +136,16 @@ export default {
           now,
           batteryLevel,
           isCharging,
+          resetAlertState ? 1 : 0,
+          resetAlertState ? 1 : 0,
           data.device_id
         ).run();
 
-        // Step 4: If critical event and not already alerted, trigger n8n webhook
+        // Step 4: If critical event, trigger n8n webhook
+        // Recovery always triggers (even if alert_sent was 1), others only if alert_sent is 0
         let webhookTriggered = false;
-        if (criticalEvent && current.alert_sent === 0) {
+        const shouldTriggerWebhook = criticalEvent && (criticalEvent === 'recovery' || current.alert_sent === 0);
+        if (shouldTriggerWebhook) {
           try {
             await fetch('https://agent.binatrix.io/webhook/tablet-critical-alert', {
               method: 'POST',
