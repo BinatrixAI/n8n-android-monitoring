@@ -58,7 +58,8 @@ export default {
     }
 
     try {
-      // POST /api/heartbeat - Update tablet state (called by n8n)
+      // POST /api/heartbeat - Update tablet state (called by MacroDroid directly)
+      // Hybrid approach: stores data AND triggers n8n for critical events
       if (path === '/api/heartbeat' && request.method === 'POST') {
         const data = await request.json() as TabletData;
 
@@ -66,35 +67,86 @@ export default {
           return errorResponse('device_id is required');
         }
 
-        // Update tablet state
+        const now = new Date().toISOString();
+        const isCharging = data.is_charging ? 1 : 0;
+        const batteryLevel = data.battery_level ?? 100;
+
+        // Step 1: Read current state (to save as previous and detect changes)
+        const current = await env.DB.prepare(`
+          SELECT is_charging, battery_level, last_battery_alert_level, alert_sent, device_name
+          FROM tablets WHERE device_id = ?
+        `).bind(data.device_id).first<{
+          is_charging: number;
+          battery_level: number;
+          last_battery_alert_level: number;
+          alert_sent: number;
+          device_name: string;
+        }>();
+
+        if (!current) {
+          return errorResponse('Device not found', 404);
+        }
+
+        // Step 2: Detect critical events that need immediate alert
+        let criticalEvent: string | null = null;
+
+        // Power lost: was charging, now not charging
+        if (current.is_charging === 1 && isCharging === 0) {
+          criticalEvent = 'power_lost';
+        }
+        // Critical battery: below 5%, not charging, haven't alerted at this level
+        else if (batteryLevel < 5 && isCharging === 0 && current.last_battery_alert_level > 5) {
+          criticalEvent = 'critical_battery';
+        }
+
+        // Step 3: Update D1 with new values, storing previous state
         const result = await env.DB.prepare(`
           UPDATE tablets SET
+            previous_is_charging = ?,
+            previous_battery_level = ?,
             last_seen = ?,
             battery_level = ?,
             is_charging = ?,
-            alert_sent = ?,
-            alert_type = ?,
-            alert_timestamp = ?,
-            last_battery_alert_level = ?,
-            status = ?,
+            status = 'online',
             updated_at = CURRENT_TIMESTAMP
           WHERE device_id = ?
         `).bind(
-          data.last_seen || new Date().toISOString(),
-          data.battery_level ?? 100,
-          data.is_charging ? 1 : 0,
-          data.alert_sent ? 1 : 0,
-          data.alert_type || 'none',
-          data.alert_timestamp || null,
-          data.last_battery_alert_level ?? 100,
-          data.status || 'online',
+          current.is_charging,
+          current.battery_level,
+          now,
+          batteryLevel,
+          isCharging,
           data.device_id
         ).run();
+
+        // Step 4: If critical event and not already alerted, trigger n8n webhook
+        let webhookTriggered = false;
+        if (criticalEvent && current.alert_sent === 0) {
+          try {
+            await fetch('https://agent.binatrix.io/webhook/tablet-critical-alert', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                device_id: data.device_id,
+                device_name: current.device_name,
+                alert_type: criticalEvent,
+                battery_level: batteryLevel,
+                is_charging: isCharging,
+                timestamp: now,
+              }),
+            });
+            webhookTriggered = true;
+          } catch (e) {
+            console.error('Failed to trigger n8n webhook:', e);
+          }
+        }
 
         return jsonResponse({
           success: true,
           changes: result.meta.changes,
           device_id: data.device_id,
+          critical_event: criticalEvent,
+          webhook_triggered: webhookTriggered,
         });
       }
 

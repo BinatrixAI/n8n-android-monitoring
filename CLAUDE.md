@@ -4,55 +4,81 @@
 
 **Purpose**: Monitor Android tablets at physical locations, send Telegram alerts for power loss, low battery, and connection issues.
 
+**Architecture**: Hybrid approach (v2.0 - January 2026)
+- **Data Path**: MacroDroid → Worker API → D1 (always stores data first)
+- **Critical Alerts**: Worker detects & triggers n8n webhook immediately
+- **Non-Critical Alerts**: n8n polls D1 every 5 minutes
+
 **Components**:
-1. **MacroDroid** (on tablet) - Sends HTTP webhooks
-2. **n8n** - Processes webhooks, sends Telegram alerts
-3. **Cloudflare Worker** - API for D1 database
-4. **Cloudflare D1** - SQLite database storing tablet state
+1. **MacroDroid** (on tablet) - Sends HTTP POST to Worker API
+2. **Cloudflare Worker** - Stores data in D1, triggers n8n for critical events
+3. **Cloudflare D1** - SQLite database storing tablet state
+4. **n8n** - Handles alerts (webhook for critical, scheduled for non-critical)
 5. **Dashboard** - Next.js UI showing status
 
 ## Quick Reference
 
 ### URLs
 ```
-Dashboard:    https://tablet-monitor.pages.dev
-Worker API:   https://tablet-monitor-api.binatrix.workers.dev
-n8n Webhook:  https://agent.binatrix.io/webhook/tablet-heartbeat
+Dashboard:         https://tablet-monitor.pages.dev
+Worker API:        https://tablet-monitor-api.binatrix.workers.dev
+MacroDroid Target: https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat
 ```
 
 ### IDs
 ```
-Cloudflare Account:    85b301e09d399a4c5cc4933d0ac9fd03
-D1 Database ID:        efd09049-fc15-4692-b07b-bc3eb51af718
-n8n Heartbeat WF:      PMxDyhROy6OOyB5d
-n8n Watchdog WF:       BcKkOltuBjZQZazK
-Telegram Chat ID:      -1003504666665
+Cloudflare Account:       85b301e09d399a4c5cc4933d0ac9fd03
+D1 Database ID:           efd09049-fc15-4692-b07b-bc3eb51af718
+n8n Critical Alert WF:    rTkKlTGn0TCexCV0
+n8n Monitor (5-min) WF:   EweQnfB7cW4fZoTX
+Telegram Chat ID:         -1003504666665
 ```
 
-## Data Flow
+### Deprecated (disabled)
+```
+n8n Heartbeat WF:  PMxDyhROy6OOyB5d  [DISABLED]
+n8n Watchdog WF:   BcKkOltuBjZQZazK  [DISABLED]
+Old Webhook:       https://agent.binatrix.io/webhook/tablet-heartbeat (DO NOT USE)
+```
+
+## Architecture v2.0 (Hybrid)
 
 ```
-1. MacroDroid (Tablet)
-   ↓ POST JSON to webhook
-2. n8n Webhook (Tablet Heartbeat Listener)
-   ↓ Extract data, detect event type
-3. n8n → Worker API (POST /api/heartbeat)
-   ↓ Update tablet state in D1
-4. n8n → Telegram (if alert needed)
-   ↓ Send formatted message
-5. n8n → Worker API (POST /api/alert)
-   ↓ Log alert to history
-6. Dashboard reads from Worker API
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Tablet    │────▶│  Cloudflare │────▶│     D1      │
+│ (MacroDroid)│     │   Worker    │     │  Database   │
+└─────────────┘     └──────┬──────┘     └──────┬──────┘
+                           │                   │
+                    critical events     every 5 min
+                           │                   │
+                           ▼                   ▼
+                    ┌─────────────┐     ┌─────────────┐
+                    │    n8n      │     │    n8n      │
+                    │  (webhook)  │     │ (scheduled) │
+                    └──────┬──────┘     └──────┬──────┘
+                           │                   │
+                           └───────┬───────────┘
+                                   ▼
+                            ┌─────────────┐
+                            │  Telegram   │
+                            └─────────────┘
 ```
+
+### Critical Events (Immediate via Webhook)
+- `power_lost` - Charger disconnected (is_charging: 1 → 0)
+- `critical_battery` - Battery < 5% and not charging
+
+### Non-Critical Events (5-min Polling)
+- `connection_lost` - No heartbeat for 30+ minutes
+- `recovery` - Device back online after being offline
+- `medium_battery` - Battery < 50%
+- `low_battery` - Battery < 20%
 
 ## MacroDroid Configuration
 
-### Critical: Variable Syntax
-**Use curly braces `{}` for all MacroDroid variables, NOT square brackets `[]`**
-
-### Webhook URL
+### Webhook URL (NEW - use this)
 ```
-https://agent.binatrix.io/webhook/tablet-heartbeat
+https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat
 ```
 
 ### HTTP Request Settings
@@ -63,101 +89,21 @@ https://agent.binatrix.io/webhook/tablet-heartbeat
 ### Heartbeat JSON (every 5 minutes)
 ```json
 {
-"device_id": "tablet_001",
-"event_type": "heartbeat",
-"battery_level": {battery},
-"is_charging": "{power}",
-"timestamp": "{year}-{month_digit}-{dayofmonth}T{hour_0}:{minute}:{second}Z"
+  "device_id": "tablet_001",
+  "battery_level": {battery},
+  "is_charging": {power}
 }
 ```
 
-### Power Lost JSON (trigger: Power Disconnected)
-```json
-{
-"device_id": "tablet_001",
-"event_type": "power_lost",
-"battery_level": {battery},
-"is_charging": "off",
-"timestamp": "{year}-{month_digit}-{dayofmonth}T{hour_0}:{minute}:{second}Z"
-}
-```
+**Note**: No `event_type` needed - Worker auto-detects critical events by comparing state.
 
-### Low Battery JSON (trigger: Battery <= 20%)
-```json
-{
-"device_id": "tablet_001",
-"event_type": "low_battery",
-"battery_level": {battery},
-"is_charging": "{power}",
-"timestamp": "{year}-{month_digit}-{dayofmonth}T{hour_0}:{minute}:{second}Z"
-}
-```
-
-## MacroDroid Magic Text Reference
-
-### Battery & Power
+### Magic Text Variables
 | Variable | Returns | Example |
 |----------|---------|---------|
 | `{battery}` | Battery % (number) | `80` |
-| `{power}` | Charging state | `on` or `off` |
+| `{power}` | Boolean | `true` or `false` |
 
-### Date & Time
-| Variable | Returns | Example |
-|----------|---------|---------|
-| `{year}` | 4-digit year | `2026` |
-| `{month_digit}` | Month number | `01` |
-| `{dayofmonth}` | Day with leading zero | `15` |
-| `{hour_0}` | Hour 24h with leading zero | `05` |
-| `{minute}` | Minute | `54` |
-| `{second}` | Second | `30` |
-
-## n8n Workflow: Tablet Heartbeat Listener
-
-**ID**: `PMxDyhROy6OOyB5d`
-
-### Node Flow
-```
-Webhook → Extract Data → Read from D1 → Detect Event Type → Update D1 → IF Alert? → Format Message → Telegram → Log Alert
-```
-
-### Alert Types
-| Event | Condition | Telegram Message |
-|-------|-----------|------------------|
-| `power_lost` | Power disconnected | "Power Supply Disconnected" |
-| `low_battery` | Battery ≤ 20% | "Low Battery Warning" |
-| `recovery` | Device back online after alert | "System Online" |
-| `battery_drop` | Battery dropped 10% while not charging | "Battery Level Update" |
-
-### Important: Time Formatting
-The Format Alert Message node uses **current n8n server time**, NOT the MacroDroid timestamp:
-```javascript
-// Uses new Date() - n8n server time in Jerusalem timezone
-const timestamp = new Date().toLocaleString('en-GB', {
-  timeZone: 'Asia/Jerusalem',
-  day: '2-digit', month: '2-digit',
-  hour: '2-digit', minute: '2-digit',
-  hour12: false
-});
-```
-
-**Reason**: MacroDroid sends local time with UTC 'Z' suffix, causing 2-hour offset.
-
-## n8n Workflow: Tablet Watchdog Timer
-
-**ID**: `BcKkOltuBjZQZazK`
-
-### Purpose
-Runs every 5 minutes to detect tablets that stopped sending heartbeats.
-
-### Alert Condition
-- Tablet silent for 35+ minutes
-- `alert_sent` is false/0
-- Status is not already 'offline'
-
-### Node Flow
-```
-Schedule (5min) → Read All Tablets from D1 → Check Silent Tablets → IF Any? → Format Alert → Telegram → Update Status to Offline
-```
+**Important**: Use `{power}` which returns boolean, not `"{power}"` string.
 
 ## Cloudflare Worker API
 
@@ -165,12 +111,23 @@ Schedule (5min) → Read All Tablets from D1 → Check Silent Tablets → IF Any
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/heartbeat` | Update tablet state |
-| POST | `/api/alert` | Log alert to history |
+| POST | `/api/heartbeat` | Update tablet state (MacroDroid calls this) |
+| POST | `/api/alert` | Log alert to history (n8n calls this) |
 | GET | `/api/tablets` | List all tablets |
 | GET | `/api/tablets/:id` | Get single tablet |
 | GET | `/api/alerts` | Get alert history |
 | POST | `/api/tablets` | Create new tablet |
+
+### POST /api/heartbeat Response
+```json
+{
+  "success": true,
+  "changes": 1,
+  "device_id": "tablet_001",
+  "critical_event": "power_lost",  // or null
+  "webhook_triggered": true        // if n8n was called
+}
+```
 
 ### D1 Database Schema
 
@@ -181,6 +138,8 @@ CREATE TABLE tablets (
   last_seen TEXT,
   battery_level INTEGER DEFAULT 100,
   is_charging INTEGER DEFAULT 1,
+  previous_is_charging INTEGER DEFAULT 1,      -- For power_lost detection
+  previous_battery_level INTEGER DEFAULT 100,  -- For battery_drop detection
   alert_sent INTEGER DEFAULT 0,
   alert_type TEXT DEFAULT 'none',
   alert_timestamp TEXT,
@@ -200,38 +159,58 @@ CREATE TABLE alert_history (
 );
 ```
 
+## n8n Workflows
+
+### Tablet Critical Alert Handler (rTkKlTGn0TCexCV0)
+**Trigger**: Webhook at `/webhook/tablet-critical-alert`
+**Called by**: Worker API when critical event detected
+
+```
+Webhook → Format Alert Message → Send Telegram → Log to D1
+```
+
+### Tablet Monitor 5-min (EweQnfB7cW4fZoTX)
+**Trigger**: Schedule every 5 minutes
+
+```
+Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → Update D1
+```
+
+**Detects**:
+- Connection lost (30+ min silent)
+- Recovery (was offline, now online)
+- Battery thresholds (50%, 20%, 5%)
+
 ## Timezone Configuration
 
 | Component | Timezone | Format |
 |-----------|----------|--------|
-| MacroDroid | Device local (Israel) | Formatted as UTC with 'Z' |
+| MacroDroid | N/A | Just sends battery/charging state |
+| Worker API | UTC | `new Date().toISOString()` |
 | n8n Alert Messages | Asia/Jerusalem | DD/MM, HH:MM (24h) |
 | D1 Database | UTC | CURRENT_TIMESTAMP |
 | Dashboard Display | Asia/Jerusalem | DD/MM, HH:MM (24h) |
 
-**Critical**: D1 stores timestamps without timezone suffix. Dashboard must append 'Z' before parsing.
-
 ## Troubleshooting
 
-### MacroDroid 422 Error
-- Ensure using curly braces `{}` not square brackets `[]`
-- Verify JSON has no syntax errors
-
-### Dashboard Shows Wrong Time
-- Check `formatJerusalemTime()` appends 'Z' to D1 timestamps
-- D1 stores UTC, must convert to Jerusalem
-
-### Telegram Shows Wrong Time
-- n8n Format Alert Message node should use `new Date()`, not MacroDroid timestamp
-
-### No Alerts Received
-- Check MacroDroid webhook URL is exact
-- Verify n8n workflow is active
-- Check Telegram bot credentials
+### No Critical Alerts Received
+1. Check Worker response includes `"webhook_triggered": true`
+2. Verify n8n Critical Alert workflow is active
+3. Check `alert_sent` flag in D1 (should be 0 to allow alerts)
 
 ### Tablet Shows Offline But Is Sending
-- Check if `alert_sent` got stuck at 1
-- Recovery event should reset status
+1. Check D1 `last_seen` is updating
+2. Verify 5-min monitor workflow is running
+3. Check if `status` is stuck - run recovery detection
+
+### Reset Tablet Alert State
+```sql
+UPDATE tablets SET
+  alert_sent = 0,
+  status = 'online',
+  last_battery_alert_level = 100
+WHERE device_id = 'tablet_001';
+```
 
 ## Adding New Tablet
 
@@ -241,6 +220,20 @@ INSERT INTO tablets (device_id, device_name, status)
 VALUES ('tablet_002', 'Kitchen Tablet', 'offline');
 ```
 
-2. **Configure MacroDroid** with new `device_id`
+2. **Configure MacroDroid** with:
+   - URL: `https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat`
+   - device_id: `tablet_002`
 
 3. **Test** by triggering a heartbeat
+
+## File Locations
+
+```
+cloudflare/worker/src/index.ts  - Worker API code
+cloudflare/worker/wrangler.toml - Worker config
+```
+
+## Related Repos
+
+- **lotix-dashboard**: Next.js dashboard UI
+- **n8n-catalog**: Index of all n8n automations
