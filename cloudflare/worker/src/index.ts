@@ -47,6 +47,17 @@ function errorResponse(message: string, status = 400): Response {
   return jsonResponse({ error: message, success: false }, status);
 }
 
+// Parse charging state from various formats (MacroDroid sends "On"/"Off" strings)
+function parseChargingState(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value === 'string') {
+    const lower = value.toLowerCase();
+    return lower === 'on' || lower === 'true' || lower === '1';
+  }
+  return false;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -68,7 +79,7 @@ export default {
         }
 
         const now = new Date().toISOString();
-        const isCharging = data.is_charging ? 1 : 0;
+        const isCharging = parseChargingState(data.is_charging) ? 1 : 0;
         const batteryLevel = data.battery_level ?? 100;
 
         // Step 1: Read current state (to save as previous and detect changes)
