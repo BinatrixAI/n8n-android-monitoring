@@ -176,10 +176,24 @@ Webhook → Format Alert Message → Send Telegram → Log to D1
 Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → Update D1
 ```
 
-**Detects**:
-- Connection lost (30+ min silent)
-- Recovery (was offline, now online)
-- Battery thresholds (50%, 20%, 5%)
+**Detects** (in priority order):
+1. `connection_lost` - No heartbeat for 30+ minutes (uses `status !== 'offline'` to prevent duplicates)
+2. `recovery` - Was offline, now online with recent heartbeat
+3. `critical_battery` - Battery < 5% (uses `last_battery_alert_level > 5`)
+4. `low_battery` - Battery < 20% (uses `last_battery_alert_level > 20`)
+5. `medium_battery` - Battery < 50% (uses `last_battery_alert_level > 50`)
+
+## Alert Duplicate Prevention
+
+**Important**: Different alert types use different mechanisms to prevent spam:
+
+| Alert Type | Duplicate Prevention | Reset Condition |
+|------------|---------------------|-----------------|
+| `connection_lost` | `status !== 'offline'` | Device sends heartbeat (recovery) |
+| `recovery` | `status === 'offline'` | Device goes offline again |
+| Battery alerts | `last_battery_alert_level > threshold` | Charging + battery >= 50%, or recovery |
+
+**Note**: Battery alerts do NOT check `alert_sent` flag - they only use `last_battery_alert_level`. This allows battery alerts to fire even if a connection_lost alert was previously sent.
 
 ## Timezone Configuration
 
@@ -196,7 +210,17 @@ Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → U
 ### No Critical Alerts Received
 1. Check Worker response includes `"webhook_triggered": true`
 2. Verify n8n Critical Alert workflow is active
-3. Check `alert_sent` flag in D1 (should be 0 to allow alerts)
+3. For `power_lost`/`critical_battery`: Check `alert_sent` flag (should be 0)
+
+### No Battery Alerts (50%, 20%, 5%)
+1. Check `last_battery_alert_level` in D1 - must be > threshold
+2. Battery alerts are INDEPENDENT of `alert_sent` flag
+3. Device must NOT be charging (`is_charging = 0`)
+
+### No Connection Lost Alert
+1. Check `status` field - must NOT be 'offline'
+2. Check `last_seen` - must be 30+ minutes ago
+3. Connection_lost is INDEPENDENT of `alert_sent` flag
 
 ### Tablet Shows Offline But Is Sending
 1. Check D1 `last_seen` is updating
@@ -205,9 +229,15 @@ Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → U
 
 ### Reset Tablet Alert State
 ```sql
+-- Full reset (for testing)
 UPDATE tablets SET
   alert_sent = 0,
   status = 'online',
+  last_battery_alert_level = 100
+WHERE device_id = 'tablet_001';
+
+-- Reset only battery threshold (keep connection status)
+UPDATE tablets SET
   last_battery_alert_level = 100
 WHERE device_id = 'tablet_001';
 ```
