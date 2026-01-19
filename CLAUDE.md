@@ -20,7 +20,7 @@
 
 ### URLs
 ```
-Dashboard:         https://tablet-monitor.pages.dev
+Dashboard:         https://lotix.binatrix.net (Clerk auth required)
 Worker API:        https://tablet-monitor-api.binatrix.workers.dev
 MacroDroid Target: https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat
 ```
@@ -235,5 +235,5 @@ cloudflare/worker/wrangler.toml - Worker config
 
 ## Related Repos
 
-- **lotix-dashboard**: Next.js dashboard UI
+- **lotix-dashboard**: Next.js 16 dashboard UI with Clerk authentication, deployed to Cloudflare Workers
 - **n8n-catalog**: Index of all n8n automations
