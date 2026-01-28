@@ -84,12 +84,11 @@ export default {
 
         // Step 1: Read current state (to save as previous and detect changes)
         const current = await env.DB.prepare(`
-          SELECT is_charging, battery_level, last_battery_alert_level, alert_sent, device_name, status
+          SELECT is_charging, battery_level, alert_sent, device_name, status
           FROM tablets WHERE device_id = ?
         `).bind(data.device_id).first<{
           is_charging: number;
           battery_level: number;
-          last_battery_alert_level: number;
           alert_sent: number;
           device_name: string;
           status: string;
@@ -99,25 +98,40 @@ export default {
           return errorResponse('Device not found', 404);
         }
 
-        // Step 2: Detect critical events that need immediate alert
-        let criticalEvent: string | null = null;
+        // Step 2: Detect critical events using THRESHOLD CROSSING logic
+        // Compare previous battery (current.battery_level) with new battery (batteryLevel)
+        const criticalEvents: string[] = [];
+        const previousBattery = current.battery_level ?? 100;
 
         // Recovery: device was offline, now sending heartbeat
         if (current.status === 'offline') {
-          criticalEvent = 'recovery';
+          criticalEvents.push('recovery');
         }
         // Power lost: was charging, now not charging
         else if (current.is_charging === 1 && isCharging === 0) {
-          criticalEvent = 'power_lost';
+          criticalEvents.push('power_lost');
         }
-        // Critical battery: below 5%, not charging, haven't alerted at this level
-        else if (batteryLevel < 5 && isCharging === 0 && current.last_battery_alert_level > 5) {
-          criticalEvent = 'critical_battery';
+
+        // Battery threshold crossings (only when not charging)
+        // Check ALL thresholds - multiple can fire if battery dropped through several
+        if (isCharging === 0) {
+          // Check 50% threshold
+          if (previousBattery >= 50 && batteryLevel < 50) {
+            criticalEvents.push('medium_battery');
+          }
+          // Check 20% threshold
+          if (previousBattery >= 20 && batteryLevel < 20) {
+            criticalEvents.push('low_battery');
+          }
+          // Check 5% threshold (critical)
+          if (previousBattery >= 5 && batteryLevel < 5) {
+            criticalEvents.push('critical_battery');
+          }
         }
 
         // Step 3: Update D1 with new values, storing previous state
-        // On recovery, reset alert_sent and last_battery_alert_level
-        const resetAlertState = criticalEvent === 'recovery';
+        // On recovery, reset alert_sent
+        const resetAlertSent = criticalEvents.includes('recovery');
         const result = await env.DB.prepare(`
           UPDATE tablets SET
             previous_is_charging = ?,
@@ -127,7 +141,6 @@ export default {
             is_charging = ?,
             status = 'online',
             alert_sent = CASE WHEN ? THEN 0 ELSE alert_sent END,
-            last_battery_alert_level = CASE WHEN ? THEN 100 ELSE last_battery_alert_level END,
             updated_at = CURRENT_TIMESTAMP
           WHERE device_id = ?
         `).bind(
@@ -136,32 +149,34 @@ export default {
           now,
           batteryLevel,
           isCharging,
-          resetAlertState ? 1 : 0,
-          resetAlertState ? 1 : 0,
+          resetAlertSent ? 1 : 0,
           data.device_id
         ).run();
 
-        // Step 4: If critical event, trigger n8n webhook
-        // Recovery always triggers (even if alert_sent was 1), others only if alert_sent is 0
-        let webhookTriggered = false;
-        const shouldTriggerWebhook = criticalEvent && (criticalEvent === 'recovery' || current.alert_sent === 0);
-        if (shouldTriggerWebhook) {
-          try {
-            await fetch('https://agent.binatrix.io/webhook/tablet-critical-alert', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                device_id: data.device_id,
-                device_name: current.device_name,
-                alert_type: criticalEvent,
-                battery_level: batteryLevel,
-                is_charging: isCharging,
-                timestamp: now,
-              }),
-            });
-            webhookTriggered = true;
-          } catch (e) {
-            console.error('Failed to trigger n8n webhook:', e);
+        // Step 4: If critical events, trigger n8n webhook for EACH event
+        // Recovery always triggers, others only if alert_sent is 0
+        let webhooksTriggered = 0;
+        for (const event of criticalEvents) {
+          const shouldTrigger = event === 'recovery' || current.alert_sent === 0;
+          if (shouldTrigger) {
+            try {
+              await fetch('https://agent.binatrix.io/webhook/tablet-critical-alert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  device_id: data.device_id,
+                  device_name: current.device_name,
+                  alert_type: event,
+                  battery_level: batteryLevel,
+                  previous_battery_level: previousBattery,
+                  is_charging: isCharging,
+                  timestamp: now,
+                }),
+              });
+              webhooksTriggered++;
+            } catch (e) {
+              console.error('Failed to trigger n8n webhook:', e);
+            }
           }
         }
 
@@ -169,8 +184,8 @@ export default {
           success: true,
           changes: result.meta.changes,
           device_id: data.device_id,
-          critical_event: criticalEvent,
-          webhook_triggered: webhookTriggered,
+          critical_events: criticalEvents,
+          webhooks_triggered: webhooksTriggered,
         });
       }
 

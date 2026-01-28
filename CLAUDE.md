@@ -66,13 +66,26 @@ Old Webhook:       https://agent.binatrix.io/webhook/tablet-heartbeat (DO NOT US
 
 ### Critical Events (Immediate via Webhook)
 - `power_lost` - Charger disconnected (is_charging: 1 → 0)
-- `critical_battery` - Battery < 5% and not charging
+- `critical_battery` - Battery crosses below 5% (not charging)
+- `low_battery` - Battery crosses below 20% (not charging)
+- `medium_battery` - Battery crosses below 50% (not charging)
 - `recovery` - Device was offline, now sending heartbeat
 
 ### Non-Critical Events (5-min Polling)
 - `connection_lost` - No heartbeat for 30+ minutes
-- `medium_battery` - Battery < 50%
-- `low_battery` - Battery < 20%
+
+### Battery Alert Logic (Threshold Crossing - January 2026)
+Battery alerts use **threshold crossing detection**: compares `previous_battery_level` with current `battery_level` on each heartbeat.
+
+| Previous | Current | Alert(s) Triggered |
+|----------|---------|-------------------|
+| 70% | 45% | `medium_battery` (crossed 50%) |
+| 45% | 60% | None (battery increased) |
+| 60% | 45% | `medium_battery` AGAIN (crossed 50% again) |
+| 70% | 15% | BOTH `medium_battery` AND `low_battery` |
+| 25% | 3% | BOTH `low_battery` AND `critical_battery` |
+
+**Key benefit**: If battery recovers and drops again, alerts will fire again (unlike the old `last_battery_alert_level` approach which was one-way).
 
 ## MacroDroid Configuration
 
@@ -124,10 +137,12 @@ https://tablet-monitor-api.binatrix.workers.dev/api/heartbeat
   "success": true,
   "changes": 1,
   "device_id": "tablet_001",
-  "critical_event": "power_lost",  // or null
-  "webhook_triggered": true        // if n8n was called
+  "critical_events": ["medium_battery", "low_battery"],  // array, can have multiple
+  "webhooks_triggered": 2                                 // count of webhooks sent
 }
 ```
+
+**Note**: Multiple events can trigger in one heartbeat (e.g., battery dropping from 70% to 15% crosses both 50% and 20% thresholds).
 
 ### D1 Database Schema
 
@@ -179,9 +194,10 @@ Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → U
 **Detects** (in priority order):
 1. `connection_lost` - No heartbeat for 30+ minutes (uses `status !== 'offline'` to prevent duplicates)
 2. `recovery` - Was offline, now online with recent heartbeat
-3. `critical_battery` - Battery < 5% (uses `last_battery_alert_level > 5`)
-4. `low_battery` - Battery < 20% (uses `last_battery_alert_level > 20`)
-5. `medium_battery` - Battery < 50% (uses `last_battery_alert_level > 50`)
+3. Battery threshold crossings (backup - Worker should catch these first):
+   - `medium_battery` - Battery crossed below 50%
+   - `low_battery` - Battery crossed below 20%
+   - `critical_battery` - Battery crossed below 5%
 
 ## Alert Duplicate Prevention
 
@@ -191,9 +207,16 @@ Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → U
 |------------|---------------------|-----------------|
 | `connection_lost` | `status !== 'offline'` | Device sends heartbeat (recovery) |
 | `recovery` | `status === 'offline'` | Device goes offline again |
-| Battery alerts | `last_battery_alert_level > threshold` | Charging + battery >= 50%, or recovery |
+| Battery alerts | Threshold crossing detection | Automatic - alerts when battery crosses threshold again |
 
-**Note**: Battery alerts do NOT check `alert_sent` flag - they only use `last_battery_alert_level`. This allows battery alerts to fire even if a connection_lost alert was previously sent.
+### Battery Threshold Crossing (January 2026)
+Battery alerts use `previous_battery_level` vs `battery_level` comparison:
+- Alert fires when: `previous >= threshold AND current < threshold`
+- If battery recovers (goes up) and drops again, the threshold crossing happens again → alert fires again
+- Multiple thresholds can be crossed in one heartbeat → multiple alerts sent
+- No manual reset needed - the logic handles re-alerting automatically
+
+**Note**: The `last_battery_alert_level` column still exists in D1 but is NO LONGER USED for alert decisions.
 
 ## Timezone Configuration
 
@@ -213,9 +236,10 @@ Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → U
 3. For `power_lost`/`critical_battery`: Check `alert_sent` flag (should be 0)
 
 ### No Battery Alerts (50%, 20%, 5%)
-1. Check `last_battery_alert_level` in D1 - must be > threshold
-2. Battery alerts are INDEPENDENT of `alert_sent` flag
+1. Battery alerts use THRESHOLD CROSSING: `previous_battery_level` must be >= threshold AND `battery_level` must be < threshold
+2. Check if `previous_battery_level` was already below the threshold (no crossing = no alert)
 3. Device must NOT be charging (`is_charging = 0`)
+4. If stuck, manually set `previous_battery_level` higher than current to force a crossing on next heartbeat
 
 ### No Connection Lost Alert
 1. Check `status` field - must NOT be 'offline'
@@ -233,13 +257,18 @@ Schedule → Read All Tablets → Detect Alerts → IF Alert? → Telegram → U
 UPDATE tablets SET
   alert_sent = 0,
   status = 'online',
-  last_battery_alert_level = 100
+  previous_battery_level = 100
 WHERE device_id = 'tablet_001';
 
--- Reset only battery threshold (keep connection status)
+-- Force battery alert on next heartbeat (set previous higher than current)
 UPDATE tablets SET
-  last_battery_alert_level = 100
+  previous_battery_level = battery_level + 10
 WHERE device_id = 'tablet_001';
+
+-- Example: Force 50% alert - set previous to 55%, current stays at actual level
+UPDATE tablets SET
+  previous_battery_level = 55
+WHERE device_id = 'tablet_001' AND battery_level < 50;
 ```
 
 ## Adding New Tablet
